@@ -1,4 +1,51 @@
 #!/usr/bin/env python3
+"""
+Mealie Bulk Ingredient Parser
+=============================
+
+Bulk-parses plain-text recipe ingredients in Mealie into structured
+quantity / unit / food fields using Mealie's own ingredient parser API
+(POST /api/parser/ingredients, NLP parser). Intended for libraries where
+imported recipes have unparsed ingredients (e.g. thousands of recipes with
+no foods linked).
+
+WHAT IT DOES
+------------
+- Picks random recipes that have ingredients but no linked foods and have
+  not yet been tagged TAG_NAME ("Parsed").
+- Parses each ingredient line and shows: original text, qty, unit, food.
+- Converts common US/imperial units to metric (oz/lb -> g, cup/fl oz/pint/
+  quart/gallon -> ml). Conversions assume US-sourced recipes
+  (1 cup = 240 ml, 1 pint = 473 ml). Edit CONVERT to change this.
+- In live mode, writes the parsed ingredients back to the recipe and adds
+  the "Parsed" tag so progress can be tracked and runs can be repeated.
+
+*** WARNING - READ BEFORE RUNNING ***
+-------------------------------------
+- LIVE MODE (DRY_RUN = False) MODIFIES YOUR RECIPES. Ingredient fields are
+  overwritten and cannot be automatically reverted.
+- TAKE A MEALIE BACKUP FIRST (Admin > Backups) and keep it until you have
+  checked the results.
+- It also CREATES NEW FOODS AND UNITS in your database wherever the parser
+  finds no match. These persist even if you later restore recipes.
+- The NLP parser is imperfect. Expect wrong or loose food matches
+  (e.g. "salt" -> "salt and pepper", "pkg" prefixes, wrong qty for lines like
+  "1 (4 oz) log goat cheese"). Review output before scaling up.
+- Not affiliated with or endorsed by Mealie. Tested only against the
+  author's own Mealie instance/version; API paths and schemas may differ on
+  other versions. USE AT YOUR OWN RISK, NO WARRANTY.
+
+RECOMMENDED WORKFLOW
+--------------------
+1. Back up Mealie.
+2. Set BASE and TOKEN below. Create a dedicated API token (User Profile >
+   API Tokens) and delete it when finished.
+3. Run with DRY_RUN = True and a small COUNT several times. Check the output.
+4. Run live with COUNT = 1 and open that recipe in Mealie to verify.
+5. Increase COUNT gradually, spot-checking between runs.
+6. Filter by the "Parsed" tag in Mealie to track progress.
+"""
+
 import json, random, sys, urllib.request, functools
 print = functools.partial(print, flush=True)
 

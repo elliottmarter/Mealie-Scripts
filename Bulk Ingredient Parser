@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+import json, random, sys, urllib.request, functools
+print = functools.partial(print, flush=True)
+
+BASE = "http://x.x.x.x:3010"
+TOKEN = "<your token>"
+DRY_RUN = True      # True = show only, False = actually parse and save
+COUNT = 5           # recipes to process per run
+TAG_NAME = "Parsed"
+
+# US/imperial unit -> (factor, metric unit name)
+CONVERT = {
+    "ounce": (28.35, "gram"), "oz": (28.35, "gram"),
+    "pound": (453.59, "gram"), "lb": (453.59, "gram"),
+    "cup": (240, "millilitre"),
+    "fluid ounce": (29.57, "millilitre"), "fl oz": (29.57, "millilitre"),
+    "pint": (473, "millilitre"), "quart": (946, "millilitre"),
+    "gallon": (3785, "millilitre"),
+}
+
+def call(path, method="GET", data=None):
+    req = urllib.request.Request(
+        BASE + path, method=method,
+        data=json.dumps(data).encode() if data is not None else None,
+        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            body = r.read()
+            return json.loads(body) if body else None
+    except Exception as e:
+        print(f"!! FAILED on {method} {path}: {e}")
+        sys.exit(1)
+
+def line_of(i):
+    return (i.get("originalText") or i.get("note") or "").strip()
+
+def has_tag(recipe):
+    return any((t.get("name") or "").lower() == TAG_NAME.lower() for t in recipe.get("tags") or [])
+
+def is_unparsed(recipe):
+    if has_tag(recipe):
+        return False
+    ings = [i for i in recipe.get("recipeIngredient", []) if line_of(i)]
+    return bool(ings) and not any(i.get("food") for i in ings)
+
+foods_by_name, units_by_name = {}, {}
+
+def get_or_create(kind, obj):
+    """kind = 'foods' or 'units'. Returns an object with an id."""
+    cache = foods_by_name if kind == "foods" else units_by_name
+    if obj.get("id"):
+        return obj
+    key = obj["name"].lower()
+    if key not in cache:
+        cache[key] = call(f"/api/{kind}", "POST", {"name": obj["name"]})
+        print(f"  (created new {kind[:-1]}: {obj['name']})")
+    return cache[key]
+
+print(f"Mealie ingredient parser - {'DRY RUN (nothing will be saved)' if DRY_RUN else 'LIVE MODE (recipes WILL be changed)'}")
+print(f"Processing {COUNT} recipes\n")
+
+for f in call("/api/foods?perPage=-1&page=1")["items"]:
+    foods_by_name[f["name"].lower()] = f
+for u in call("/api/units?perPage=-1&page=1")["items"]:
+    units_by_name[u["name"].lower()] = u
+
+parsed_tag = None
+for t in call("/api/organizers/tags?perPage=-1&page=1")["items"]:
+    if t["name"].lower() == TAG_NAME.lower():
+        parsed_tag = t
+if parsed_tag is None and not DRY_RUN:
+    parsed_tag = call("/api/organizers/tags", "POST", {"name": TAG_NAME})
+    print(f"Created tag '{TAG_NAME}'")
+elif parsed_tag:
+    print(f"Using existing tag '{TAG_NAME}'")
+
+slugs = [r["slug"] for r in call("/api/recipes?perPage=-1&page=1")["items"]]
+print(f"Found {len(slugs)} recipes")
+random.shuffle(slugs)
+
+done = 0
+for slug in slugs:
+    if done >= COUNT:
+        break
+    recipe = call(f"/api/recipes/{slug}")
+    if not is_unparsed(recipe):
+        continue                      # already parsed/tagged or no ingredients, skip
+    done += 1
+
+    ings = recipe["recipeIngredient"]
+    idx = [n for n, i in enumerate(ings) if line_of(i)]
+    lines = [line_of(ings[n]) for n in idx]
+
+    print("\n" + "=" * 70)
+    print(f"RECIPE {done} of {COUNT}: {recipe['name']}  ({slug})")
+    print("=" * 70)
+
+    res = call("/api/parser/ingredients", "POST", {"parser": "nlp", "ingredients": lines})
+    for n, r in zip(idx, res):
+        p = r["ingredient"]
+        qty = p.get("quantity") or 0
+        unit = (p.get("unit") or {}).get("name") or ""
+        food = (p.get("food") or {}).get("name") or ""
+        qty_s = f"{qty:g}" if qty else "-"
+
+        print(f"\n{r['input']}")
+        print(f"qty: {qty_s} | unit: {unit or '-'} | food: {food or 'NONE'}")
+
+        new_qty, new_unit = qty, p.get("unit")
+        if unit.lower() in CONVERT:
+            factor, metric = CONVERT[unit.lower()]
+            if qty:
+                new_qty = round(qty * factor)
+                print(f"CONVERTED (METRIC): {new_qty} {'g' if metric == 'gram' else 'ml'} (converted from {qty_s} {unit})")
+            else:
+                print(f"CONVERTED (METRIC): no quantity, unit changes to {metric}")
+            new_unit = {"name": metric}
+        if not food:
+            print("WARNING: no food matched, left as text")
+
+        if not DRY_RUN:
+            ing = ings[n]
+            ing["originalText"] = r["input"]
+            ing["quantity"] = new_qty
+            ing["unit"] = get_or_create("units", new_unit) if new_unit else None
+            ing["food"] = get_or_create("foods", p["food"]) if p.get("food") else None
+            ing["note"] = p.get("note") or ""
+            ing["display"] = ""
+
+    if not DRY_RUN:
+        tags = list(recipe.get("tags") or [])
+        tags.append({"id": parsed_tag["id"], "name": parsed_tag["name"], "slug": parsed_tag["slug"]})
+        call(f"/api/recipes/{slug}", "PATCH", {"recipeIngredient": ings, "tags": tags})
+        print(f"\nSAVED and tagged '{TAG_NAME}': {recipe['name']}")
+    else:
+        print(f"\nWould tag '{TAG_NAME}': {recipe['name']}")
+
+if done == 0:
+    print("\nNo unparsed recipes left.")
+print(f"\nDone. {done} recipes {'previewed, nothing changed' if DRY_RUN else 'parsed, saved and tagged'}.")

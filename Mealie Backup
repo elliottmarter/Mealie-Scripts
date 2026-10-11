@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Mealie backup: create a backup (default location) and prune backups older than N days.
+# Requires: curl, jq, GNU date.
+set -euo pipefail
+
+MEALIE_URL="xxxx"
+MEALIE_TOKEN="xxxx"
+RETENTION_DAYS=30
+
+AUTH=(-H "Authorization: Bearer ${MEALIE_TOKEN}" -H "accept: application/json")
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
+
+# 1. Create backup
+log "Creating backup..."
+curl -fsS -X POST "${AUTH[@]}" "${MEALIE_URL}/api/admin/backups" > /dev/null
+log "Backup created."
+
+# 2. List backups and delete anything older than retention
+cutoff=$(date -d "-${RETENTION_DAYS} days" +%s)
+deleted=0
+
+while IFS=$'\t' read -r name date; do
+  [[ -z "$name" ]] && continue
+  ts=$(date -d "$date" +%s 2>/dev/null) || { log "Skipping $name (unparseable date: $date)"; continue; }
+  if (( ts < cutoff )); then
+    log "Deleting $name (dated $date)"
+    curl -fsS -X DELETE "${AUTH[@]}" "${MEALIE_URL}/api/admin/backups/${name}" > /dev/null
+    deleted=$((deleted + 1))
+  fi
+done < <(curl -fsS "${AUTH[@]}" "${MEALIE_URL}/api/admin/backups" | jq -r '.imports[] | [.name, .date] | @tsv')
+
+log "Done. Removed ${deleted} backup(s) older than ${RETENTION_DAYS} days."

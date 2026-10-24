@@ -22,7 +22,7 @@ ONLY_UNLABELLED = True                             # False = also re-check foods
 BATCH_SIZE = 100                                   # foods per Claude request
 CACHE_FILE = "/mnt/user/appdata/mealie-labels/ai_labels.json"
 
-# In shop walking order. Mealie names get a 2-digit prefix ("01 Fruit & Veg") so A-Z sorting follows the shop.
+# In shop walking order (reorder in Mealie's shopping list view).
 LABEL_COLORS = {
     "Fruit & Veg": "#4caf50",
     "Herbs & Spices": "#8bc34a",
@@ -40,8 +40,7 @@ LABEL_COLORS = {
     "Frozen": "#80deea",
     "Drinks": "#03a9f4",
 }
-LABELS = list(LABEL_COLORS)                                          # names Claude chooses from
-MEALIE_NAME = {n: f"{i:02d} {n}" for i, n in enumerate(LABELS, 1)}   # names used in Mealie
+LABELS = list(LABEL_COLORS)
 
 SYSTEM = """You sort grocery items into the aisle of a UK discount supermarket (Lidl/Aldi) so a shopping list follows the store layout.
 Pick exactly one label per item from the allowed list. Names may be US-style (cilantro = coriander, zucchini = courgette, ground beef = mince, eggplant = aubergine) or include packaging words like "pkg"; judge by the food itself.
@@ -187,24 +186,23 @@ def main():
 
     ids = {l["name"]: l["id"] for l in api.labels()}
     for name in LABELS:
-        mname = MEALIE_NAME[name]
-        if mname in ids:
+        if name in ids:
             continue
         if APPLY:
-            ids[mname] = api.create_label(mname, LABEL_COLORS[name])["id"]
-            print(f"  created label: {mname}")
+            ids[name] = api.create_label(name, LABEL_COLORS[name])["id"]
+            print(f"  created label: {name}")
         else:
-            ids[mname] = f"(new {mname})"
-            print(f"  would create label: {mname}")
+            ids[name] = f"(new {name})"
+            print(f"  would create label: {name}")
 
     if APPLY:   # confirm all 15 really exist in Mealie before carrying on
         now = {l["name"] for l in api.labels()}
-        missing = [MEALIE_NAME[n] for n in LABELS if MEALIE_NAME[n] not in now]
+        missing = [n for n in LABELS if n not in now]
         if missing:
             sys.exit(f"Mealie is missing labels after creating them: {', '.join(missing)}")
         print(f"  all {len(LABELS)} labels present in Mealie")
 
-    current_ids = {ids[MEALIE_NAME[n]] for n in LABELS}
+    current_ids = {ids[n] for n in LABELS}
     # Foods on a label not in LABELS count as unlabelled.
     candidates = [f for f in foods if not (ONLY_UNLABELLED and f.get("labelId") in current_ids)]
     cache = load_cache()
@@ -222,16 +220,16 @@ def main():
     unanswered = []
     for f in sorted(candidates, key=lambda x: x["name"].lower()):
         label = cache.get(key(f["name"]))
-        if label not in MEALIE_NAME:
+        if label not in LABELS:
             unanswered.append(f["name"])
             continue
-        label_id = ids[MEALIE_NAME[label]]
+        label_id = ids[label]
         if f.get("labelId") == label_id:
             skipped += 1
             continue
         if LIMIT and done >= LIMIT:
             break
-        print(f"  {f['name']} -> {MEALIE_NAME[label]}")
+        print(f"  {f['name']} -> {label}")
         if APPLY:
             api.set_label(f, label_id)
         done += 1

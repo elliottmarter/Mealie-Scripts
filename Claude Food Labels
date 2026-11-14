@@ -1,26 +1,44 @@
 #!/usr/bin/env python3
 """
-Assign one supermarket-aisle label to every Mealie food, with Claude choosing the label.
-Runs as-is from Unraid User Scripts (python3, stdlib only).
-Missing labels from the 15 below are created first (existing ones are reused by exact name).
+Keep Mealie's foods and shopping lists tidy, with Claude making the judgement calls.
+Runs as-is from Unraid User Scripts (python3, stdlib only). Schedule it every 5 minutes (custom cron: */5 * * * *).
+
+Each run does three things:
+  1. LINK  - loose shopping list items (typed in with no food attached) are linked to a food. Claude either picks
+             an existing food (the item text is then added to that food as an alias, e.g. "yellow onions" becomes
+             an alias of "brown onion") or proposes a new food, which is created. Only runs once the list has been
+             quiet for QUIET_MINUTES, so a burst of adds is handled in one go.
+  2. LABEL - every food with no aisle label gets one of the 15 labels below.
+  3. SYNC  - shopping list items take the aisle label of their food so the list sorts by shop layout.
+Existing labels are matched by name ignoring any "NN " number prefix, so "01 Fruit & Veg" is reused.
+Missing labels are created as "NN Name" in the order below.
 
 1. Fill in MEALIE_URL, MEALIE_TOKEN and ANTHROPIC_API_KEY below.
-2. Run with APPLY = False: Claude decides, decisions are printed and saved to CACHE_FILE, nothing changes in Mealie.
-3. Review the output. To override a decision, edit CACHE_FILE (food name in lower case -> label).
-4. Set APPLY = True, LIMIT = 1, run, check that food in Mealie. Then LIMIT = 0 and run again.
-   Cached decisions are reused, so only foods Claude hasn't seen before cost an API call.
+2. Run with APPLY = False: decisions are printed and saved to the cache files, nothing changes in Mealie.
+   (Dry runs still ignore the quiet period if FORCE = True.)
+3. Review the output. To override a decision, edit a cache file:
+     CACHE_FILE       food name (lower case) -> label
+     ITEM_CACHE_FILE  item text (lower case) -> {"action": "existing"|"new"|"skip", "food": "name"}
+4. Set APPLY = True, LIMIT = 1, run, check the result in Mealie. Then LIMIT = 0 and schedule it.
+   Cached decisions are reused, so only text Claude hasn't seen before costs an API call.
 """
-import json, os, sys, time, urllib.error, urllib.request
+import json, os, re, sys, time, urllib.error, urllib.request
+from datetime import datetime, timezone
 
 MEALIE_URL = "CHANGE-ME"                           # e.g. http://192.168.10.20:3010, no trailing /api
 MEALIE_TOKEN = "CHANGE-ME"                         # Mealie > User Profile > API Tokens
 ANTHROPIC_API_KEY = "CHANGE-ME"                    # console.anthropic.com > API Keys
 MODEL = "claude-haiku-5-5"                         # cheap and plenty for this job
 APPLY = False                                      # False = dry run (prints only)
-LIMIT = 0                                          # 0 = all; e.g. 1 for a single-food test
+LIMIT = 0                                          # 0 = all; e.g. 1 for a single-item/food test (per phase)
 ONLY_UNLABELLED = True                             # False = also re-check foods that already have a label
-BATCH_SIZE = 100                                   # foods per Claude request
+BATCH_SIZE = 100                                   # foods/items per Claude request
+LINK_ITEMS = True                                  # phase 1 on/off
+QUIET_MINUTES = 15                                 # wait this long after the last list change before linking
+FORCE = False                                      # True = ignore the quiet period (handy for testing)
 CACHE_FILE = "/mnt/user/appdata/mealie-labels/ai_labels.json"
+ITEM_CACHE_FILE = "/mnt/user/appdata/mealie-labels/ai_items.json"
+LOCK_FILE = "/mnt/user/appdata/mealie-labels/run.lock"
 
 # In shop walking order (reorder in Mealie's shopping list view).
 LABEL_COLORS = {
@@ -62,14 +80,32 @@ Guidance:
 - Toiletries: personal care (toothpaste, shampoo, soap, deodorant), medicines and first aid.
 Return every item via the assign_labels tool, using the index given for each item."""
 
+ITEM_SYSTEM = """You tidy a UK household's shopping list. Each list entry was typed in free-hand. For each one, decide how it maps to the household's food database (the existing foods are listed, with their aliases in brackets).
+Choose one action per entry:
+- existing: the entry is the same shop-bought product as an existing food, interchangeable when shopping (yellow onions = brown onion, spring onions = scallions, mince = minced beef). Set "food" to that food's exact name.
+- new: it is a real food or household product with no suitable existing food. Set "food" to a clean generic name: lower case, singular, UK English, typos fixed (brocolli = broccoli), no quantities or brands.
+- skip: it contains a quantity or unit (2 lbs chicken, 500g flour, 3 tins beans), is not a product, or you cannot tell what it is.
+Varieties you would choose between in the shop stay separate: red onions are not brown onions, semi skimmed milk is not skimmed milk. When unsure between existing and new, choose new. When unsure about anything else, choose skip.
+Return every entry via the resolve_items tool, using the index given for each entry."""
+
 
 def key(s):
-    return s.strip().lower()
+    return " ".join(s.strip().lower().split())
+
+
+def base(label_name):
+    """'01 Fruit & Veg' -> 'Fruit & Veg'."""
+    return re.sub(r"^\d+\s+", "", label_name).strip()
+
+
+def parse_ts(s):
+    s = re.sub(r"(\.\d+)", lambda m: (m.group(1) + "000000")[:7], s.replace("Z", "+00:00"))
+    return datetime.fromisoformat(s)
 
 
 class Mealie:
-    def __init__(self, base, token):
-        self.base, self.token = base.rstrip("/"), token
+    def __init__(self, base_url, token):
+        self.base, self.token = base_url.rstrip("/"), token
 
     def req(self, method, path, body=None):
         data = None if body is None else json.dumps(body).encode()
@@ -107,33 +143,39 @@ class Mealie:
     def labels(self):
         return self.paged("/api/groups/labels")
 
+    def shopping_items(self):
+        return self.paged("/api/households/shopping/items")
+
     def create_label(self, name, color):
         return self.req("POST", "/api/groups/labels", {"name": name, "color": color})
 
-    def set_label(self, food, label_id):
+    def create_food(self, name, aliases):
+        return self.req("POST", "/api/foods", {"name": name, "aliases": [{"name": a} for a in aliases]})
+
+    def put_food(self, food, **changes):
         body = {k: v for k, v in food.items() if k not in ("label", "createdAt", "updatedAt", "recipeCount")}
-        body["labelId"] = label_id
+        body.update(changes)
         self.req("PUT", f"/api/foods/{food['id']}", body)
 
+    def set_label(self, food, label_id):
+        self.put_food(food, labelId=label_id)
 
-def ask_claude(names):
-    """Return {lowercase name: label} for a batch of food names."""
-    tool = {
-        "name": "assign_labels",
-        "description": "Record the supermarket aisle label for each item.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"assignments": {"type": "array", "items": {
-                "type": "object",
-                "properties": {"i": {"type": "integer"}, "label": {"type": "string", "enum": LABELS}},
-                "required": ["i", "label"]}}},
-            "required": ["assignments"],
-        },
-    }
+    def link_item(self, item_id, food_id, label_id):
+        cur = self.req("GET", f"/api/households/shopping/items/{item_id}")
+        body = {k: v for k, v in cur.items() if k not in ("food", "unit", "label", "display", "createdAt", "updatedAt")}
+        body["foodId"] = food_id
+        body["labelId"] = label_id
+        if body.get("note") and not body.get("recipeReferences"):
+            body["note"] = ""            # the food name replaces the typed text
+        self.req("PUT", f"/api/households/shopping/items/{item_id}", body)
+
+
+def claude(tool, names_header, lines, system):
+    """Run one forced-tool Claude request. Returns the tool input dict."""
     body = {
-        "model": MODEL, "max_tokens": 8192, "system": SYSTEM,
-        "tools": [tool], "tool_choice": {"type": "tool", "name": "assign_labels"},
-        "messages": [{"role": "user", "content": "Items:\n" + "\n".join(f"{i}: {n}" for i, n in enumerate(names))}],
+        "model": MODEL, "max_tokens": 8192, "system": system,
+        "tools": [tool], "tool_choice": {"type": "tool", "name": tool["name"]},
+        "messages": [{"role": "user", "content": names_header + "\n".join(lines)}],
     }
     data = json.dumps(body).encode()
     for attempt in range(4):
@@ -153,68 +195,210 @@ def ask_claude(names):
             if attempt < 3:
                 time.sleep(5); continue
             sys.exit(f"Cannot reach Claude API: {e}")
-    result = {}
     for block in out.get("content", []):
         if block.get("type") == "tool_use":
-            for a in block["input"].get("assignments", []):
-                i, label = a.get("i"), a.get("label")
-                if isinstance(i, int) and 0 <= i < len(names) and label in LABELS:
-                    result[key(names[i])] = label
+            return block["input"]
+    return {}
+
+
+def ask_labels(names):
+    """Return {lowercase name: label} for a batch of food names."""
+    tool = {
+        "name": "assign_labels",
+        "description": "Record the supermarket aisle label for each item.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"assignments": {"type": "array", "items": {
+                "type": "object",
+                "properties": {"i": {"type": "integer"}, "label": {"type": "string", "enum": LABELS}},
+                "required": ["i", "label"]}}},
+            "required": ["assignments"],
+        },
+    }
+    res = claude(tool, "Items:\n", [f"{i}: {n}" for i, n in enumerate(names)], SYSTEM)
+    result = {}
+    for a in res.get("assignments", []):
+        i, label = a.get("i"), a.get("label")
+        if isinstance(i, int) and 0 <= i < len(names) and label in LABELS:
+            result[key(names[i])] = label
     return result
 
 
-def load_cache():
+def ask_items(texts, foods):
+    """Return {lowercase text: {"action", "food"}} for a batch of loose list entries."""
+    tool = {
+        "name": "resolve_items",
+        "description": "Record how each shopping list entry maps to the food database.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"decisions": {"type": "array", "items": {
+                "type": "object",
+                "properties": {"i": {"type": "integer"},
+                               "action": {"type": "string", "enum": ["existing", "new", "skip"]},
+                               "food": {"type": "string"}},
+                "required": ["i", "action"]}}},
+            "required": ["decisions"],
+        },
+    }
+    known = []
+    for f in sorted(foods, key=lambda x: x["name"].lower()):
+        al = ", ".join(a["name"] for a in f.get("aliases") or [])
+        known.append(f"- {f['name']}" + (f" [{al}]" if al else ""))
+    header = "Existing foods:\n" + "\n".join(known) + "\n\nList entries:\n"
+    res = claude(tool, header, [f"{i}: {t}" for i, t in enumerate(texts)], ITEM_SYSTEM)
+    result = {}
+    for d in res.get("decisions", []):
+        i = d.get("i")
+        if isinstance(i, int) and 0 <= i < len(texts) and d.get("action") in ("existing", "new", "skip"):
+            result[key(texts[i])] = {"action": d["action"], "food": (d.get("food") or "").strip()}
+    return result
+
+
+def load_json(path, valid=None):
     try:
-        with open(CACHE_FILE) as fh:
-            cache = json.load(fh)
+        with open(path) as fh:
+            data = json.load(fh)
     except FileNotFoundError:
         return {}
-    return {k: v for k, v in cache.items() if v in LABELS}   # drop decisions using retired labels
+    return {k: v for k, v in data.items() if valid is None or valid(v)}
 
 
-def save_cache(cache):
-    os.makedirs(os.path.dirname(CACHE_FILE) or ".", exist_ok=True)
-    with open(CACHE_FILE, "w") as fh:
-        json.dump(dict(sorted(cache.items())), fh, indent=1, ensure_ascii=False)
+def save_json(path, data):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump(dict(sorted(data.items())), fh, indent=1, ensure_ascii=False)
+
+
+def forms(s):
+    """A name plus its simple plural/singular spellings."""
+    s = key(s)
+    out = {s, s + "s", s + "es"}
+    if s.endswith("es"):
+        out.add(s[:-2])
+    if s.endswith("s"):
+        out.add(s[:-1])
+    return out
+
+
+def food_index(foods):
+    """normalised name/plural/alias -> food (first one wins)."""
+    idx = {}
+    for f in foods:
+        for n in [f["name"], f.get("pluralName")] + [a["name"] for a in f.get("aliases") or []]:
+            if n:
+                idx.setdefault(key(n), f)
+    return idx
+
+
+def plan_links(api, foods):
+    """Phase 1. Returns {item id: food} to link. Creates foods/aliases when APPLY. Empty if the list is still busy."""
+    items = [i for i in api.shopping_items()
+             if not i.get("checked") and not i.get("foodId") and not i.get("recipeReferences")
+             and (i.get("note") or "").strip()]
+    if not items:
+        print("LINK: no loose items.")
+        return {}
+    newest = max(parse_ts(i["updatedAt"]) for i in items)
+    age = (datetime.now(timezone.utc) - newest).total_seconds() / 60
+    if age < QUIET_MINUTES and not FORCE:
+        print(f"LINK: list changed {age:.0f} min ago, waiting for {QUIET_MINUTES} quiet minutes ({len(items)} loose items).")
+        return {}
+
+    idx = food_index(foods)
+
+    def local(text):
+        for form in forms(text):
+            if form in idx:
+                return idx[form]
+        return None
+
+    cache = load_json(ITEM_CACHE_FILE, lambda v: isinstance(v, dict) and v.get("action") in ("existing", "new", "skip"))
+    todo = sorted({key(i["note"]) for i in items if not local(i["note"]) and key(i["note"]) not in cache})
+    for start in range(0, len(todo), BATCH_SIZE):
+        batch = todo[start:start + BATCH_SIZE]
+        print(f"LINK: asking Claude about {start + 1}-{start + len(batch)} of {len(todo)} entries...")
+        cache.update(ask_items(batch, foods))
+        save_json(ITEM_CACHE_FILE, cache)
+
+    links, created, count = {}, {}, 0
+    for item in sorted(items, key=lambda i: i["note"].lower()):
+        text = key(item["note"])
+        food = local(text)
+        if food:                                   # already matches a name/alias: just link it
+            links[item["id"]] = food
+            print(f"  {item['note']} -> {food['name']}")
+            continue
+        d = cache.get(text)
+        if not d or d["action"] == "skip" or not d["food"]:
+            print(f"  left alone: {item['note']}")
+            continue
+        if LIMIT and count >= LIMIT:
+            break
+        count += 1
+        target = idx.get(key(d["food"])) or created.get(key(d["food"]))
+        if d["action"] == "existing" and not target:
+            print(f"  left alone: {item['note']} (Claude named unknown food '{d['food']}')")
+            continue
+        if target:                                 # existing food: record the typed text as an alias
+            print(f"  {item['note']} -> {target['name']} (+alias '{text}')")
+            if APPLY:
+                aliases = [{"name": a["name"]} for a in target.get("aliases") or []] + [{"name": text}]
+                api.put_food(target, aliases=aliases)
+                target["aliases"] = aliases
+            idx[text] = target
+        else:                                      # new food
+            name = d["food"].strip().lower()
+            print(f"  {item['note']} -> NEW food '{name}'")
+            if APPLY:
+                target = api.create_food(name, [text] if key(name) != text else [])
+                idx[key(name)] = idx[text] = created[key(name)] = target
+                foods.append(target)
+            else:
+                target = {"id": None, "name": name, "labelId": None}
+        links[item["id"]] = target
+    return links
 
 
 def main():
     if "CHANGE-ME" in (MEALIE_URL + MEALIE_TOKEN + ANTHROPIC_API_KEY):
         sys.exit("Fill in MEALIE_URL, MEALIE_TOKEN and ANTHROPIC_API_KEY at the top of the script first.")
+    print(f"{'APPLYING' if APPLY else 'DRY RUN (nothing will change in Mealie)'}")
     api = Mealie(MEALIE_URL, MEALIE_TOKEN)
     foods = api.foods()
 
-    ids = {l["name"]: l["id"] for l in api.labels()}
-    for name in LABELS:
+    ids = {}
+    for l in api.labels():
+        ids.setdefault(base(l["name"]), l["id"])
+    for n, name in enumerate(LABELS, 1):
         if name in ids:
             continue
         if APPLY:
-            ids[name] = api.create_label(name, LABEL_COLORS[name])["id"]
-            print(f"  created label: {name}")
+            ids[name] = api.create_label(f"{n:02d} {name}", LABEL_COLORS[name])["id"]
+            print(f"  created label: {n:02d} {name}")
         else:
             ids[name] = f"(new {name})"
-            print(f"  would create label: {name}")
-
+            print(f"  would create label: {n:02d} {name}")
     if APPLY:   # confirm all 15 really exist in Mealie before carrying on
-        now = {l["name"] for l in api.labels()}
+        now = {base(l["name"]) for l in api.labels()}
         missing = [n for n in LABELS if n not in now]
         if missing:
             sys.exit(f"Mealie is missing labels after creating them: {', '.join(missing)}")
-        print(f"  all {len(LABELS)} labels present in Mealie")
+    label_name = {v: k for k, v in ids.items()}
+    current_ids = set(ids.values())
 
-    current_ids = {ids[n] for n in LABELS}
-    # Foods on a label not in LABELS count as unlabelled.
+    # Phase 1: link loose shopping list items to foods.
+    links = plan_links(api, foods) if LINK_ITEMS else {}
+
+    # Phase 2: label foods. Foods on a label not in LABELS count as unlabelled.
     candidates = [f for f in foods if not (ONLY_UNLABELLED and f.get("labelId") in current_ids)]
-    cache = load_cache()
+    cache = load_json(CACHE_FILE, lambda v: v in LABELS)   # drops decisions using retired labels
     todo = sorted({f["name"] for f in candidates if key(f["name"]) not in cache}, key=str.lower)
-    print(f"{len(foods)} foods, {len(candidates)} to check, {len(todo)} need Claude. "
-          f"{'APPLYING' if APPLY else 'DRY RUN (nothing will change in Mealie)'}")
-
+    print(f"LABEL: {len(foods)} foods, {len(candidates)} to check, {len(todo)} need Claude.")
     for start in range(0, len(todo), BATCH_SIZE):
         batch = todo[start:start + BATCH_SIZE]
         print(f"  asking Claude about {start + 1}-{start + len(batch)} of {len(todo)}...")
-        cache.update(ask_claude(batch))
-        save_cache(cache)
+        cache.update(ask_labels(batch))
+        save_json(CACHE_FILE, cache)
 
     done = skipped = 0
     unanswered = []
@@ -230,13 +414,55 @@ def main():
         if LIMIT and done >= LIMIT:
             break
         print(f"  {f['name']} -> {label}")
-        if APPLY:
+        if APPLY and f.get("id"):
             api.set_label(f, label_id)
+            f["labelId"] = label_id
         done += 1
-    print(f"{'Updated' if APPLY else 'Would update'} {done}, already correct {skipped}, no answer {len(unanswered)}.")
+    print(f"{'Updated' if APPLY else 'Would update'} {done} foods, already correct {skipped}, no answer {len(unanswered)}.")
     for n in unanswered:
         print(f"  no answer (re-run to retry): {n}")
 
+    # Phase 3: point list items at their food and its aisle label.
+    by_id = {f["id"]: f for f in foods if f.get("id")}
+    synced = 0
+    for item in api.shopping_items():
+        if item.get("checked"):
+            continue
+        food = links.get(item["id"]) or by_id.get(item.get("foodId"))
+        if not food:
+            continue
+        want = food.get("labelId") if food.get("labelId") in current_ids else None
+        linking = item["id"] in links
+        if not linking and (not want or item.get("labelId") == want):
+            continue
+        if linking and food.get("id") is None:
+            continue                              # new food in a dry run
+        if LIMIT and synced >= LIMIT:
+            break
+        print(f"  list item '{item.get('note') or item.get('display')}': "
+              f"{'link to ' + food['name'] + ', ' if linking else ''}label {label_name.get(want, 'none')}")
+        if APPLY:
+            api.link_item(item["id"], food["id"], want)
+        synced += 1
+    print(f"SYNC: {'updated' if APPLY else 'would update'} {synced} list items.")
+
+
+def run_locked():
+    os.makedirs(os.path.dirname(LOCK_FILE) or ".", exist_ok=True)
+    try:
+        if time.time() - os.path.getmtime(LOCK_FILE) < 600:
+            sys.exit("Another run is in progress, skipping.")
+    except FileNotFoundError:
+        pass
+    open(LOCK_FILE, "w").close()
+    try:
+        main()
+    finally:
+        try:
+            os.remove(LOCK_FILE)
+        except OSError:
+            pass
+
 
 if __name__ == "__main__":
-    main()
+    run_locked()

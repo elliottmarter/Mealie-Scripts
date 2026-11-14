@@ -84,8 +84,9 @@ ITEM_SYSTEM = """You tidy a UK household's shopping list. Each list entry was ty
 Choose one action per entry:
 - existing: the entry is the same shop-bought product as an existing food, interchangeable when shopping (yellow onions = brown onion, spring onions = scallions, mince = minced beef). Set "food" to that food's exact name.
 - new: it is a real food or household product with no suitable existing food. Set "food" to a clean generic name: lower case, singular, UK English, typos fixed (brocolli = broccoli), no quantities or brands.
-- skip: it contains a quantity or unit (2 lbs chicken, 500g flour, 3 tins beans), is not a product, or you cannot tell what it is.
-Varieties you would choose between in the shop stay separate: red onions are not brown onions, semi skimmed milk is not skimmed milk. When unsure between existing and new, choose new. When unsure about anything else, choose skip.
+- skip: ONLY if it contains a quantity or unit (2 lbs chicken, 500g flour, 3 tins beans), or is clearly not a food or household product, or is unreadable.
+A plain name of a food or product is never a skip, however generic: apples, potatoes, mushrooms, eggs, butter are all real foods. Use existing if one fits, otherwise new with that generic name.
+Varieties you would choose between in the shop stay separate: red onions are not brown onions, semi skimmed milk is not skimmed milk. When unsure between existing and new, choose new.
 Return every entry via the resolve_items tool, using the index given for each entry."""
 
 
@@ -324,8 +325,11 @@ def plan_links(api, foods):
             print(f"  {item['note']} -> {food['name']}")
             continue
         d = cache.get(text)
-        if not d or d["action"] == "skip" or not d["food"]:
-            print(f"  left alone: {item['note']}")
+        if not d:
+            print(f"  left alone: {item['note']} (no answer from Claude, will retry next run)")
+            continue
+        if d["action"] == "skip" or not d["food"]:
+            print(f"  left alone: {item['note']} (Claude said skip; edit {ITEM_CACHE_FILE} to override)")
             continue
         if LIMIT and count >= LIMIT:
             break

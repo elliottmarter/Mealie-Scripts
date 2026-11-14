@@ -10,8 +10,8 @@ Each run does three things:
              quiet for QUIET_MINUTES, so a burst of adds is handled in one go.
   2. LABEL - every food with no aisle label gets one of the 15 labels below.
   3. SYNC  - shopping list items take the aisle label of their food so the list sorts by shop layout.
-Existing labels are matched by name ignoring any "NN " number prefix, so "01 Fruit & Veg" is reused.
-Missing labels are created as "NN Name" in the order below.
+Existing labels are matched by exact name (the numbers keep them in shop order, e.g. "01 Fruit & Veg").
+Any of the 15 that are missing are created.
 
 1. Fill in MEALIE_URL, MEALIE_TOKEN and ANTHROPIC_API_KEY below.
 2. Run with APPLY = False: decisions are printed and saved to the cache files, nothing changes in Mealie.
@@ -42,42 +42,42 @@ LOCK_FILE = "/mnt/user/appdata/mealie-labels/run.lock"
 
 # In shop walking order (reorder in Mealie's shopping list view).
 LABEL_COLORS = {
-    "Fruit & Veg": "#4caf50",
-    "Herbs & Spices": "#8bc34a",
-    "Pasta & Rice": "#ffc107",
-    "Meat & Fish": "#b71c1c",
-    "Chilled & Deli": "#3f51b5",
-    "Dairy": "#fdd835",
-    "Baking": "#ff9800",
-    "Tins & Jars": "#9e9e9e",
-    "Sauces & Condiments": "#e53935",
-    "Snacks & Sweets": "#e91e63",
-    "Household": "#8d6e63",
-    "Toiletries": "#ba68c8",
-    "Bakery": "#c68642",
-    "Frozen": "#80deea",
-    "Drinks": "#03a9f4",
+    "01 Fruit & Veg": "#4caf50",
+    "02 Herbs & Spices": "#8bc34a",
+    "03 Pasta & Rice": "#ffc107",
+    "04 Meat & Fish": "#b71c1c",
+    "05 Chilled & Deli": "#3f51b5",
+    "06 Dairy": "#fdd835",
+    "07 Baking": "#ff9800",
+    "08 Tins & Jars": "#9e9e9e",
+    "09 Sauces & Condiments": "#e53935",
+    "10 Snacks & Sweets": "#e91e63",
+    "11 Household": "#8d6e63",
+    "12 Toiletries": "#ba68c8",
+    "13 Bakery": "#c68642",
+    "14 Frozen": "#80deea",
+    "15 Drinks": "#03a9f4",
 }
 LABELS = list(LABEL_COLORS)
 
 SYSTEM = """You sort grocery items into the aisle of a UK discount supermarket (Lidl/Aldi) so a shopping list follows the store layout.
 Pick exactly one label per item from the allowed list. Names may be US-style (cilantro = coriander, zucchini = courgette, ground beef = mince, eggplant = aubergine) or include packaging words like "pkg"; judge by the food itself.
 Guidance:
-- Fruit & Veg: fresh produce and fresh herbs, incl. bagged salad.
-- Bakery: bread, wraps, tortillas, pitta, muffins.
-- Tins & Jars: tinned veg/beans/fish/tomatoes, olives, nut butters, honey, jarred pickles.
-- Pasta & Rice: dry pasta, rice, noodles, grains, couscous, lentils, oats, breakfast cereal.
-- Sauces & Condiments: ketchup, mayo, dressings, vinegars, soy/fish sauce, pastes, pesto, jarred cooking sauces.
-- Baking: flour, sugar, baking powder/soda, cornflour, cocoa, baking chocolate, vanilla, syrups, oils, stock, nuts, seeds, dried fruit.
-- Herbs & Spices: dried herbs, ground and whole spices, spice blends and seasonings, salt, pepper. Fresh herbs stay in Fruit & Veg.
-- Snacks & Sweets: crisps, chocolate bars, biscuits, sweets.
-- Drinks: juice, soft drinks, water, alcohol, tea, coffee.
-- Meat & Fish: fresh raw meat and poultry, fresh or smoked fish and seafood.
-- Dairy: milk (incl. plant milk), butter, cream, yoghurt, eggs, cheese.
-- Chilled & Deli: cooked/cured meats, hummus, dips, fresh pasta, gnocchi, tofu/tempeh, chilled meat-free.
-- Frozen: anything frozen.
-- Household: cleaning products, kitchen roll, foil, bin bags, other non-food household items.
-- Toiletries: personal care (toothpaste, shampoo, soap, deodorant), medicines and first aid.
+- 01 Fruit & Veg: fresh produce and fresh herbs, incl. bagged salad.
+- 13 Bakery: bread, wraps, tortillas, pitta, muffins.
+- 08 Tins & Jars: tinned veg/beans/fish/tomatoes, olives, nut butters, honey, jarred pickles.
+- 03 Pasta & Rice: dry pasta, rice, noodles, grains, couscous, lentils, oats, breakfast cereal.
+- 09 Sauces & Condiments: ketchup, mayo, dressings, vinegars, soy/fish sauce, pastes, pesto, jarred cooking sauces.
+- 07 Baking: flour, sugar, baking powder/soda, cornflour, cocoa, baking chocolate, vanilla, syrups, oils, stock, nuts, seeds, dried fruit.
+- 02 Herbs & Spices: dried herbs, ground and whole spices, spice blends and seasonings, salt, pepper. Fresh herbs stay in 01 Fruit & Veg.
+- 10 Snacks & Sweets: crisps, chocolate bars, biscuits, sweets.
+- 15 Drinks: juice, soft drinks, water, alcohol, tea, coffee.
+- 04 Meat & Fish: fresh raw meat and poultry, fresh or smoked fish and seafood.
+- 06 Dairy: milk (incl. plant milk), butter, cream, yoghurt, eggs, cheese.
+- 05 Chilled & Deli: cooked/cured meats, hummus, dips, fresh pasta, gnocchi, tofu/tempeh, chilled meat-free.
+- 14 Frozen: anything frozen.
+- 11 Household: cleaning products, kitchen roll, foil, bin bags, other non-food household items.
+- 12 Toiletries: personal care (toothpaste, shampoo, soap, deodorant), medicines and first aid.
 Return every item via the assign_labels tool, using the index given for each item."""
 
 ITEM_SYSTEM = """You tidy a UK household's shopping list. Each list entry was typed in free-hand. For each one, decide how it maps to the household's food database (the existing foods are listed, with their aliases in brackets).
@@ -91,11 +91,6 @@ Return every entry via the resolve_items tool, using the index given for each en
 
 def key(s):
     return " ".join(s.strip().lower().split())
-
-
-def base(label_name):
-    """'01 Fruit & Veg' -> 'Fruit & Veg'."""
-    return re.sub(r"^\d+\s+", "", label_name).strip()
 
 
 def parse_ts(s):
@@ -368,18 +363,18 @@ def main():
 
     ids = {}
     for l in api.labels():
-        ids.setdefault(base(l["name"]), l["id"])
-    for n, name in enumerate(LABELS, 1):
+        ids.setdefault(l["name"], l["id"])
+    for name in LABELS:
         if name in ids:
             continue
         if APPLY:
-            ids[name] = api.create_label(f"{n:02d} {name}", LABEL_COLORS[name])["id"]
-            print(f"  created label: {n:02d} {name}")
+            ids[name] = api.create_label(name, LABEL_COLORS[name])["id"]
+            print(f"  created label: {name}")
         else:
             ids[name] = f"(new {name})"
-            print(f"  would create label: {n:02d} {name}")
+            print(f"  would create label: {name}")
     if APPLY:   # confirm all 15 really exist in Mealie before carrying on
-        now = {base(l["name"]) for l in api.labels()}
+        now = {l["name"] for l in api.labels()}
         missing = [n for n in LABELS if n not in now]
         if missing:
             sys.exit(f"Mealie is missing labels after creating them: {', '.join(missing)}")

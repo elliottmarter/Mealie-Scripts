@@ -1,12 +1,41 @@
 #!/usr/bin/env python3
 """Delete all checked items from every Mealie shopping list (stdlib only)."""
 import json
+import os
+import sys
 import urllib.parse
 import urllib.request
 
-MEALIE_URL = "xxxx"
-MEALIE_API = "xxxx"
-DRY_RUN = False
+def _load_conf():
+    """Read KEY="value" lines from the shared mealie.conf (same file the .sh scripts source)."""
+    path = os.environ.get("MEALIE_CONF", "/mnt/user/appdata/mealie-scripts/mealie.conf")
+    conf = {}
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                val = val.strip()
+                if val[:1] in "\"'" and val[:1] and val.find(val[0], 1) > 0:
+                    val = val[1:val.find(val[0], 1)]
+                else:
+                    val = val.split(" #")[0].strip()
+                conf[key.strip()] = val
+    except OSError as e:
+        sys.exit(f"Cannot read {path}: {e}\nCopy mealie.conf.example there and fill it in.")
+    return conf
+
+
+CONF = _load_conf()
+DATA_DIR = CONF.get("DATA_DIR", "/mnt/user/appdata/mealie-scripts")
+
+MEALIE_URL = CONF.get("MEALIE_URL", "").rstrip("/")
+MEALIE_API = CONF.get("MEALIE_API_KEY", "")
+DRY_RUN = CONF.get("APPLY", "0") != "1"   # APPLY=1 in mealie.conf to really delete
+if not MEALIE_URL or not MEALIE_API:
+    sys.exit("Set MEALIE_URL and MEALIE_API_KEY in mealie.conf first.")
 
 BATCH = 50
 

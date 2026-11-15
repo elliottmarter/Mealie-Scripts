@@ -22,7 +22,7 @@ WHAT IT DOES
 
 *** WARNING - READ BEFORE RUNNING ***
 -------------------------------------
-- LIVE MODE (DRY_RUN = False) MODIFIES YOUR RECIPES. Ingredient fields are
+- LIVE MODE (APPLY=1 in mealie.conf) MODIFIES YOUR RECIPES. Ingredient fields are
   overwritten and cannot be automatically reverted.
 - TAKE A MEALIE BACKUP FIRST (Admin > Backups) and keep it until you have
   checked the results.
@@ -38,20 +38,47 @@ WHAT IT DOES
 RECOMMENDED WORKFLOW
 --------------------
 1. Back up Mealie.
-2. Set BASE and TOKEN below. Create a dedicated API token (User Profile >
+2. Set MEALIE_URL and MEALIE_API_KEY in mealie.conf. Create a dedicated API token (User Profile >
    API Tokens) and delete it when finished.
-3. Run with DRY_RUN = True and a small COUNT several times. Check the output.
+3. Run with APPLY=0 (dry run) and a small COUNT several times. Check the output.
 4. Run live with COUNT = 1 and open that recipe in Mealie to verify.
 5. Increase COUNT gradually, spot-checking between runs.
 6. Filter by the "Parsed" tag in Mealie to track progress.
 """
 
-import json, random, sys, urllib.request, functools
+import json, os, random, sys, urllib.request, functools
 print = functools.partial(print, flush=True)
 
-BASE = "http://x.x.x.x:3010"
-TOKEN = "<your token>"
-DRY_RUN = True      # True = show only, False = actually parse and save
+def _load_conf():
+    """Read KEY="value" lines from the shared mealie.conf (same file the .sh scripts source)."""
+    path = os.environ.get("MEALIE_CONF", "/mnt/user/appdata/mealie-scripts/mealie.conf")
+    conf = {}
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                val = val.strip()
+                if val[:1] in "\"'" and val[:1] and val.find(val[0], 1) > 0:
+                    val = val[1:val.find(val[0], 1)]
+                else:
+                    val = val.split(" #")[0].strip()
+                conf[key.strip()] = val
+    except OSError as e:
+        sys.exit(f"Cannot read {path}: {e}\nCopy mealie.conf.example there and fill it in.")
+    return conf
+
+
+CONF = _load_conf()
+DATA_DIR = CONF.get("DATA_DIR", "/mnt/user/appdata/mealie-scripts")
+
+BASE = CONF.get("MEALIE_URL", "").rstrip("/")
+TOKEN = CONF.get("MEALIE_API_KEY", "")
+DRY_RUN = CONF.get("APPLY", "0") != "1"   # APPLY=1 in mealie.conf = live mode
+if not BASE or not TOKEN:
+    sys.exit("Set MEALIE_URL and MEALIE_API_KEY in mealie.conf first.")
 COUNT = 5           # recipes to process per run
 TAG_NAME = "Parsed"
 

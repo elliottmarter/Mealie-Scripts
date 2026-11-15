@@ -1,0 +1,18 @@
+# Shared settings for every script in this repo (bash and Python both read it).
+# Copy to /mnt/user/appdata/mealie-scripts/mealie.conf and edit.
+# NEVER commit the real mealie.conf - it holds your API keys.
+
+MEALIE_URL="http://YOUR-MEALIE-HOST:PORT"   # no trailing slash, no /api
+MEALIE_API_KEY="PASTE-YOUR-MEALIE-TOKEN"    # Mealie > User Profile > API Tokens
+ANTHROPIC_API_KEY="PASTE-YOUR-ANTHROPIC-KEY" # only needed by claude_food_labels.py
+
+# Safety switch for every script that changes data.
+# 0 = dry run (changes nothing), 1 = make real changes.
+APPLY=0
+
+# backup.sh: delete backups older than this many days.
+RETENTION_DAYS=30
+
+# Where tag_plan.txt, delete_list.txt, caches, logs and exports live.
+# Defaults to the folder containing mealie.conf.
+#DATA_DIR="/mnt/user/appdata/mealie-scripts"

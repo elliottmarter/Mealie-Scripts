@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Mealie backup: create a backup (default location) and prune backups older than N days.
+# Settings (MEALIE_URL, MEALIE_API_KEY, RETENTION_DAYS) come from mealie.conf.
 # Requires: curl, jq, GNU date.
 set -euo pipefail
 
-MEALIE_URL="xxxx"
-MEALIE_TOKEN="xxxx"
-RETENTION_DAYS=30
+CONF="${MEALIE_CONF:-/mnt/user/appdata/mealie-scripts/mealie.conf}"
+source "$CONF" || { echo "Cannot read $CONF"; exit 1; }
+MEALIE_URL="${MEALIE_URL%/}"
+MEALIE_TOKEN="$MEALIE_API_KEY"
+RETENTION_DAYS="${RETENTION_DAYS:-30}"
 
 AUTH=(-H "Authorization: Bearer ${MEALIE_TOKEN}" -H "accept: application/json")
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }

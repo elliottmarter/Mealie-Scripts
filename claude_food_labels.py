@@ -13,32 +13,57 @@ Each run does three things:
 Existing labels are matched by exact name (the numbers keep them in shop order, e.g. "01 Fruit & Veg").
 Any of the 15 that are missing are created.
 
-1. Fill in MEALIE_URL, MEALIE_TOKEN and ANTHROPIC_API_KEY below.
-2. Run with APPLY = False: decisions are printed and saved to the cache files, nothing changes in Mealie.
+1. Fill in MEALIE_URL, MEALIE_API_KEY and ANTHROPIC_API_KEY in mealie.conf (see mealie.conf.example).
+2. Run with APPLY=0 in mealie.conf: decisions are printed and saved to the cache files, nothing changes in Mealie.
    (Dry runs still ignore the quiet period if FORCE = True.)
 3. Review the output. To override a decision, edit a cache file:
      CACHE_FILE       food name (lower case) -> label
      ITEM_CACHE_FILE  item text (lower case) -> {"action": "existing"|"new"|"skip", "food": "name"}
-4. Set APPLY = True, LIMIT = 1, run, check the result in Mealie. Then LIMIT = 0 and schedule it.
+4. Set APPLY=1 in mealie.conf, LIMIT = 1 below, run, check the result in Mealie. Then LIMIT = 0 and schedule it.
    Cached decisions are reused, so only text Claude hasn't seen before costs an API call.
 """
 import json, os, re, sys, time, urllib.error, urllib.request
 from datetime import datetime, timezone
 
-MEALIE_URL = "CHANGE-ME"                           # e.g. http://192.168.10.20:3010, no trailing /api
-MEALIE_TOKEN = "CHANGE-ME"                         # Mealie > User Profile > API Tokens
-ANTHROPIC_API_KEY = "CHANGE-ME"                    # console.anthropic.com > API Keys
+def _load_conf():
+    """Read KEY="value" lines from the shared mealie.conf (same file the .sh scripts source)."""
+    path = os.environ.get("MEALIE_CONF", "/mnt/user/appdata/mealie-scripts/mealie.conf")
+    conf = {}
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                val = val.strip()
+                if val[:1] in "\"'" and val[:1] and val.find(val[0], 1) > 0:
+                    val = val[1:val.find(val[0], 1)]
+                else:
+                    val = val.split(" #")[0].strip()
+                conf[key.strip()] = val
+    except OSError as e:
+        sys.exit(f"Cannot read {path}: {e}\nCopy mealie.conf.example there and fill it in.")
+    return conf
+
+
+CONF = _load_conf()
+DATA_DIR = CONF.get("DATA_DIR", "/mnt/user/appdata/mealie-scripts")
+
+MEALIE_URL = CONF.get("MEALIE_URL", "")
+MEALIE_TOKEN = CONF.get("MEALIE_API_KEY", "")
+ANTHROPIC_API_KEY = CONF.get("ANTHROPIC_API_KEY", "")
 MODEL = "claude-haiku-5-5"                         # cheap and plenty for this job
-APPLY = False                                      # False = dry run (prints only)
+APPLY = CONF.get("APPLY", "0") == "1"             # set APPLY=1 in mealie.conf to make real changes
 LIMIT = 0                                          # 0 = all; e.g. 1 for a single-item/food test (per phase)
 ONLY_UNLABELLED = True                             # False = also re-check foods that already have a label
 BATCH_SIZE = 100                                   # foods/items per Claude request
 LINK_ITEMS = True                                  # phase 1 on/off
 QUIET_MINUTES = 15                                 # wait this long after the last list change before linking
 FORCE = False                                      # True = ignore the quiet period (handy for testing)
-CACHE_FILE = "/mnt/user/appdata/mealie-labels/ai_labels.json"
-ITEM_CACHE_FILE = "/mnt/user/appdata/mealie-labels/ai_items.json"
-LOCK_FILE = "/mnt/user/appdata/mealie-labels/run.lock"
+CACHE_FILE = os.path.join(DATA_DIR, "ai_labels.json")
+ITEM_CACHE_FILE = os.path.join(DATA_DIR, "ai_items.json")
+LOCK_FILE = os.path.join(DATA_DIR, "run.lock")
 
 # In shop walking order (reorder in Mealie's shopping list view).
 LABEL_COLORS = {
@@ -359,8 +384,8 @@ def plan_links(api, foods):
 
 
 def main():
-    if "CHANGE-ME" in (MEALIE_URL + MEALIE_TOKEN + ANTHROPIC_API_KEY):
-        sys.exit("Fill in MEALIE_URL, MEALIE_TOKEN and ANTHROPIC_API_KEY at the top of the script first.")
+    if not (MEALIE_URL and MEALIE_TOKEN and ANTHROPIC_API_KEY) or "CHANGE-ME" in (MEALIE_URL + MEALIE_TOKEN + ANTHROPIC_API_KEY):
+        sys.exit("Fill in MEALIE_URL, MEALIE_API_KEY and ANTHROPIC_API_KEY in mealie.conf first.")
     print(f"{'APPLYING' if APPLY else 'DRY RUN (nothing will change in Mealie)'}")
     api = Mealie(MEALIE_URL, MEALIE_TOKEN)
     foods = api.foods()
